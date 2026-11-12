@@ -26,3 +26,7 @@ jobs:
 
       - name: Test Single-File Publish
         run: dotnet publish WinNvm.csproj -c Release -r win-x64 -p:PublishSingleFile=true --no-self-contained -o ./publish
+
+      - name: Verify Published Executable
+        run: dir .\publish
+        shell: cmd
