@@ -40,11 +40,11 @@ jobs:
           $isPrerelease = $false
           $releaseTitle = "Release $tag"
 
-          if ($tag -match '-alpha-\d+$') {
+          if ($tag -match '-alpha-?\d+$') {
               $isPrerelease = $true
               $releaseTitle = "Release $tag (Alpha)"
               Write-Host "Tag $tag matched alpha pre-release."
-          } elseif ($tag -match '-beta-\d+$') {
+          } elseif ($tag -match '-beta-?\d+$') {
               $isPrerelease = $true
               $releaseTitle = "Release $tag (Beta)"
               Write-Host "Tag $tag matched beta pre-release."

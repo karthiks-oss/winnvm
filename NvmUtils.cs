@@ -128,11 +128,10 @@ namespace WinNvm
         
         internal static void PrintVersion()
         {
-            Console.WriteLine(
-                Assembly.GetExecutingAssembly().GetName().Name
-                + " " +
-                Assembly.GetExecutingAssembly().GetName().Version
-            );
+            var assembly = Assembly.GetExecutingAssembly();
+            var infoVersion = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion?.Split('+')[0];
+            var version = !string.IsNullOrEmpty(infoVersion) ? infoVersion : assembly.GetName().Version?.ToString();
+            Console.WriteLine($"{assembly.GetName().Name} {version}");
         }
 
         internal static void PrintListOfInstalledNodeVersions()
