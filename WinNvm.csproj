@@ -18,7 +18,7 @@
   <PropertyGroup Condition="'$(PublishSingleFile)' == 'true'">
     <SelfContained Condition="'$(SelfContained)' == ''">false</SelfContained>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
-    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <EnableCompressionInSingleFile Condition="'$(SelfContained)' == 'true'">true</EnableCompressionInSingleFile>
   </PropertyGroup>
 
   <ItemGroup>
