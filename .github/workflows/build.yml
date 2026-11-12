@@ -1,8 +1,8 @@
-name: .NET Framework 4.8 Build
+name: .NET Build
 
 on:
   push:
-    branches: [ master, develop ]
+    branches: [ master, develop, dotnetcore ]
   pull_request:
     branches: [ master, develop ]
 
@@ -14,14 +14,15 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup MSBuild
-        uses: microsoft/setup-msbuild@v3
-
-      - name: Setup NuGet
-        uses: NuGet/setup-nuget@v4
-
-      - name: Restore NuGet packages
-        run: nuget restore WinNvm.sln
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
 
       - name: Build solution
-        run: msbuild WinNvm.sln /p:Configuration=Release /p:Platform="Any CPU" /m
+        run: dotnet build WinNvm.sln -c Release
+
+      - name: Test Single-File Publish
+        run: dotnet publish WinNvm.csproj -c Release -r win-x64 -p:PublishSingleFile=true --no-self-contained -o ./publish

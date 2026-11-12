@@ -13,21 +13,19 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup MSBuild
-        uses: microsoft/setup-msbuild@v3
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
 
-      - name: Setup NuGet
-        uses: NuGet/setup-nuget@v4
-
-      - name: Restore NuGet packages
-        run: nuget restore WinNvm.sln
-
-      - name: Build solution
-        run: msbuild WinNvm.sln /p:Configuration=Release /p:Platform="Any CPU" /m
+      - name: Publish WinNvm (Single-File)
+        run: dotnet publish WinNvm.csproj -c Release -r win-x64 -p:PublishSingleFile=true --no-self-contained -o ./publish
 
       - name: Zip build artifacts
         run: |
-          Compress-Archive -Path ./bin/Release/* -DestinationPath ./WinNvm.zip
+          Compress-Archive -Path ./publish/WinNvm.exe -DestinationPath ./WinNvm.zip
         shell: powershell
 
       - name: Create Release

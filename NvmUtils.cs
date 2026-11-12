@@ -1,19 +1,22 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Net;
+using System.Net.Http;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text.RegularExpressions;
-using Ionic.Zip;
 using Newtonsoft.Json;
 
 namespace WinNvm
 {
     internal static class NvmUtils
     {
+        private static readonly HttpClient HttpClient = new HttpClient();
+
         // Regex to match version folder names like "v14.17.0" or "v16.13.1"
         private static readonly Regex VersionFolderRegex = new Regex(@"^v\d+\.\d+\.\d+(-\S+)?$", RegexOptions.Compiled);
 
@@ -34,11 +37,10 @@ namespace WinNvm
                 }
             }
 
-             // sort versions (lexical or semver)
+            // sort versions (lexical or semver)
             installedVersion.Sort(CompareVersionFolderNames);
 
             return installedVersion;
-
         }
 
         /// <summary>
@@ -61,17 +63,41 @@ namespace WinNvm
 
         private static void ExtractToNvmHome(string zipFileName, string verToInstall)
         {
-            using (var zipFile = ZipFile.Read(zipFileName))
+            var appPath = Path.Combine(Constants.NvmHome, "v" + verToInstall);
+            Directory.CreateDirectory(appPath);
+
+            var rootFolderPrefix = "node-v" + verToInstall + GetFileNameWithoutZip();
+
+            using (var archive = ZipFile.OpenRead(zipFileName))
             {
-                var appPath = Constants.NvmHome + "v" + verToInstall;
-                zipFile.ToList().ForEach(entry =>
+                foreach (var entry in archive.Entries)
                 {
-                    if (entry.FileName.StartsWith("node-v" + verToInstall + GetFileNameWithoutZip()))
-                        entry.FileName =
-                            entry.FileName.Substring(("node-v" + verToInstall + GetFileNameWithoutZip()).Length);
-                    Console.WriteLine(entry.FileName);
-                    entry.Extract(appPath, ExtractExistingFileAction.OverwriteSilently);
-                });
+                    var relativePath = entry.FullName;
+                    if (relativePath.StartsWith(rootFolderPrefix, StringComparison.OrdinalIgnoreCase))
+                    {
+                        relativePath = relativePath.Substring(rootFolderPrefix.Length).TrimStart('/', '\\');
+                    }
+
+                    if (string.IsNullOrEmpty(relativePath))
+                        continue;
+
+                    var destinationPath = Path.Combine(appPath, relativePath);
+
+                    if (entry.FullName.EndsWith("/") || entry.FullName.EndsWith("\\"))
+                    {
+                        Directory.CreateDirectory(destinationPath);
+                    }
+                    else
+                    {
+                        var dir = Path.GetDirectoryName(destinationPath);
+                        if (!string.IsNullOrEmpty(dir))
+                        {
+                            Directory.CreateDirectory(dir);
+                        }
+                        Console.WriteLine(relativePath);
+                        entry.ExtractToFile(destinationPath, overwrite: true);
+                    }
+                }
             }
         }
 
@@ -87,7 +113,7 @@ namespace WinNvm
         
         private static string GetSavePath(string verToInstall)
         {
-            return Path.GetTempPath() + "v" + verToInstall + ".zip";
+            return Path.Combine(Path.GetTempPath(), "v" + verToInstall + ".zip");
         }
 
         private static string GetFileName()
@@ -148,15 +174,12 @@ namespace WinNvm
         {
             var homePath = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
 
-            var rcFile = homePath + Path.DirectorySeparatorChar + Constants.RcFileName;
+            var rcFile = Path.Combine(homePath, Constants.RcFileName);
 
             if (File.Exists(rcFile))
             {
-                using (var r = new StreamReader(rcFile))
-                {
-                    var json = r.ReadToEnd();
-                    Constants.RcFileData = JsonConvert.DeserializeObject<RcFileData>(json);
-                }
+                var json = File.ReadAllText(rcFile);
+                Constants.RcFileData = JsonConvert.DeserializeObject<RcFileData>(json);
             }
 
             if (Constants.RcFileData == null || string.IsNullOrEmpty(Constants.RcFileData.NodeMirror))
@@ -172,14 +195,11 @@ namespace WinNvm
         
         private static string GetChecksumFile(string fileName)
         {
-            var fileStream = new FileStream(fileName, FileMode.OpenOrCreate,
-                FileAccess.Read);
-            
-            using (var bufferedStream = new BufferedStream(fileStream, 1024 * 32))
+            using (var fileStream = File.OpenRead(fileName))
+            using (var sha = SHA256.Create())
             {
-                var sha = new SHA256Managed();
-                var checksum = sha.ComputeHash(bufferedStream);
-                return BitConverter.ToString(checksum).Replace("-", string.Empty);
+                var checksum = sha.ComputeHash(fileStream);
+                return Convert.ToHexString(checksum);
             }
         }
         
@@ -187,55 +207,59 @@ namespace WinNvm
         {
             if (shaInfo == null) throw new ArgumentNullException(nameof(shaInfo));
             var shaSumForFile = GetChecksumFile(fileNameForSaving);
-            if (!shaInfo.ToUpper().Equals(shaSumForFile.ToUpper()))
+            if (!shaInfo.Equals(shaSumForFile, StringComparison.OrdinalIgnoreCase))
             {
                 throw new WinNvmException("SHA256 Checksum failed");
             }
         }
 
-
         internal static void ValidateNodeVersionAndDownload(string verToInstall)
         {
-            var urlToDownload = Constants.RcFileData.NodeMirror + "/index.json";
-
-            using (var webClient = new WebClient())
+            var urlToDownload = Constants.RcFileData.NodeMirror + "index.json";
+            string json;
+            try
             {
-                string json;
-                try
-                {
-                    json = webClient.DownloadString(urlToDownload);
-                }
-                catch (WebException exception)
-                {
-                    if (((HttpWebResponse) exception.Response).StatusCode == HttpStatusCode.NotFound)
-                        throw new WinNvmException("Cannot access " + urlToDownload +
-                                                  ".\nPlease check the NodeMirror property in " + Constants.RcFileName +
-                                                  " in your home directory.\nAlso check you network connection");
-                    throw new WinNvmException(exception.Message);
-                }
-                var versionJson = JsonConvert.DeserializeObject<List<NodeVersions>>(json).OrderBy(o => o.Date).ToList();
-                var tmpVersion = versionJson.Where(v => v.Version.Equals('v' + verToInstall));
-                var nodeVersionses = tmpVersion as NodeVersions[] ?? tmpVersion.ToArray();
-
-                if (!nodeVersionses.Any())
-                    throw new WinNvmException("Node version " + verToInstall + " is not available");
-
-                urlToDownload = GetDownloadUrl(verToInstall);
-                
-                var shaSums =  webClient.DownloadString(GetShaSumUrl(verToInstall)).Split(Environment.NewLine.ToCharArray());
-                var theLine = shaSums.Single(line => line.EndsWith("node-v" + verToInstall + GetFileName()));
-                var shaInfo = Regex.Split(theLine, @"\s+")[0];
-                var fileNameForSaving = GetSavePath(verToInstall);
-                Console.WriteLine("Downloading :{0} -> {1}", urlToDownload, fileNameForSaving);
-                webClient.DownloadFile(urlToDownload, fileNameForSaving);
-                Console.WriteLine("Downloaded");
-
-                ValidateSha256Sum(fileNameForSaving, shaInfo);
-
-                Console.WriteLine("Extracting");
-                ExtractToNvmHome(fileNameForSaving, verToInstall);
-                Console.WriteLine("Folder Extracted");
+                var response = HttpClient.GetAsync(urlToDownload).GetAwaiter().GetResult();
+                if (response.StatusCode == HttpStatusCode.NotFound)
+                    throw new WinNvmException("Cannot access " + urlToDownload +
+                                              ".\nPlease check the NodeMirror property in " + Constants.RcFileName +
+                                              " in your home directory.\nAlso check you network connection");
+                response.EnsureSuccessStatusCode();
+                json = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
             }
+            catch (HttpRequestException exception)
+            {
+                throw new WinNvmException(exception.Message);
+            }
+
+            var versionJson = JsonConvert.DeserializeObject<List<NodeVersions>>(json).OrderBy(o => o.Date).ToList();
+            var tmpVersion = versionJson.Where(v => v.Version.Equals('v' + verToInstall));
+            var nodeVersionses = tmpVersion as NodeVersions[] ?? tmpVersion.ToArray();
+
+            if (!nodeVersionses.Any())
+                throw new WinNvmException("Node version " + verToInstall + " is not available");
+
+            urlToDownload = GetDownloadUrl(verToInstall);
+            
+            var shaSumsContent = HttpClient.GetStringAsync(GetShaSumUrl(verToInstall)).GetAwaiter().GetResult();
+            var shaSums = shaSumsContent.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.None);
+            var theLine = shaSums.Single(line => line.EndsWith("node-v" + verToInstall + GetFileName()));
+            var shaInfo = Regex.Split(theLine, @"\s+")[0];
+            var fileNameForSaving = GetSavePath(verToInstall);
+            Console.WriteLine("Downloading :{0} -> {1}", urlToDownload, fileNameForSaving);
+
+            using (var responseStream = HttpClient.GetStreamAsync(urlToDownload).GetAwaiter().GetResult())
+            using (var fileStream = new FileStream(fileNameForSaving, FileMode.Create, FileAccess.Write, FileShare.None))
+            {
+                responseStream.CopyTo(fileStream);
+            }
+            Console.WriteLine("Downloaded");
+
+            ValidateSha256Sum(fileNameForSaving, shaInfo);
+
+            Console.WriteLine("Extracting");
+            ExtractToNvmHome(fileNameForSaving, verToInstall);
+            Console.WriteLine("Folder Extracted");
         }
 
         internal static void ValidateEnvironment()
@@ -305,12 +329,12 @@ namespace WinNvm
             var src = Constants.NvmHome + 'v' + verToUse;
             if (Directory.Exists(src))
             {
-                Directory.Delete(src,true);
-                Console.WriteLine(verToUse+" is uninstalled");
+                Directory.Delete(src, true);
+                Console.WriteLine(verToUse + " is uninstalled");
             }
             else
             {
-                throw new WinNvmException("Version "+verToUse+" not installed");
+                throw new WinNvmException("Version " + verToUse + " not installed");
             }
         }
     }
