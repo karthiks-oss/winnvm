@@ -15,6 +15,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
@@ -31,12 +33,13 @@ jobs:
         run: |
           Compress-Archive -Path ./publish/WinNvm.exe -DestinationPath ./WinNvm-${{ github.ref_name }}.zip
 
-      - name: Create GitHub Release
+      - name: Generate Changelog & Create GitHub Release
         shell: powershell
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $tag = "${{ github.ref_name }}"
+          $repo = "${{ github.repository }}"
           $isPrerelease = $false
           $releaseTitle = "Release $tag"
 
@@ -52,12 +55,79 @@ jobs:
               Write-Host "Tag $tag is a standard production release."
           }
 
+          # Find the previous tag before this one
+          $prevTag = git describe --tags --abbrev=0 "$tag^" 2>$null
+
+          if ($prevTag) {
+              Write-Host "Found previous tag: $prevTag"
+              $range = "$prevTag..$tag"
+          } else {
+              Write-Host "No previous tag found, getting full history up to $tag"
+              $range = $tag
+          }
+
+          # Collect and categorize commits
+          $rawCommits = git log $range --pretty=format:"%H|%h|%s|%an"
+
+          $prList = [System.Collections.Generic.List[string]]::new()
+          $commitList = [System.Collections.Generic.List[string]]::new()
+
+          if ($rawCommits) {
+              foreach ($line in ($rawCommits -split "`r?`n")) {
+                  if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                  $parts = $line -split '\|', 4
+                  if ($parts.Length -lt 4) { continue }
+                  $fullHash = $parts[0]
+                  $shortHash = $parts[1]
+                  $subject = $parts[2]
+                  $author = $parts[3]
+
+                  $commitUrl = "https://github.com/$repo/commit/$fullHash"
+                  $entry = "* $subject ([$shortHash]($commitUrl)) by @$author"
+
+                  if ($subject -match 'Merge pull request #(\d+)' -or $subject -match '\(#(\d+)\)') {
+                      $prList.Add($entry)
+                  } else {
+                      $commitList.Add($entry)
+                  }
+              }
+          }
+
+          $notes = [System.Text.StringBuilder]::new()
+          [void]$notes.AppendLine("### What's Changed`n")
+
+          if ($prList.Count -gt 0) {
+              [void]$notes.AppendLine("#### Pull Requests")
+              foreach ($pr in $prList) {
+                  [void]$notes.AppendLine($pr)
+              }
+              [void]$notes.AppendLine("")
+          }
+
+          if ($commitList.Count -gt 0) {
+              if ($prList.Count -gt 0) {
+                  [void]$notes.AppendLine("#### Commits")
+              }
+              foreach ($c in $commitList) {
+                  [void]$notes.AppendLine($c)
+              }
+              [void]$notes.AppendLine("")
+          }
+
+          if ($prevTag) {
+              [void]$notes.AppendLine("**Full Changelog**: https://github.com/$repo/compare/$prevTag...$tag")
+          } else {
+              [void]$notes.AppendLine("**Full Changelog**: https://github.com/$repo/commits/$tag")
+          }
+
+          $notes.ToString() | Out-File -FilePath release-notes.md -Encoding utf8
+
           $ghArgs = @(
               "release", "create", $tag,
               "./WinNvm-$tag.zip",
               "./publish/WinNvm.exe#WinNvm-$tag-win-x64.exe",
               "--title", $releaseTitle,
-              "--generate-notes"
+              "--notes-file", "release-notes.md"
           )
 
           if ($isPrerelease) {
