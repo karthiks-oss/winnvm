@@ -58,37 +58,74 @@ jobs:
           # Find the previous tag before this one
           $prevTag = git describe --tags --abbrev=0 "$tag^" 2>$null
 
-          if ($prevTag) {
-              Write-Host "Found previous tag: $prevTag"
-              $range = "$prevTag..$tag"
-          } else {
-              Write-Host "No previous tag found, getting full history up to $tag"
-              $range = $tag
+          # Try querying GitHub API for commits to resolve real GitHub usernames
+          $commitsData = @()
+          try {
+              if ($prevTag) {
+                  Write-Host "Fetching compare $prevTag...$tag from GitHub API"
+                  $resp = gh api "repos/$repo/compare/$prevTag...$tag" | ConvertFrom-Json
+                  $commitsData = $resp.commits
+              } else {
+                  Write-Host "Fetching commits up to $tag from GitHub API"
+                  $resp = gh api "repos/$repo/commits?sha=$tag&per_page=100" | ConvertFrom-Json
+                  $commitsData = $resp
+              }
+          } catch {
+              Write-Warning "GitHub API query failed, falling back to git log: $_"
           }
-
-          # Collect and categorize commits
-          $rawCommits = git log $range --pretty=format:"%H|%h|%s|%an"
 
           $prList = [System.Collections.Generic.List[string]]::new()
           $commitList = [System.Collections.Generic.List[string]]::new()
 
-          if ($rawCommits) {
-              foreach ($line in ($rawCommits -split "`r?`n")) {
-                  if ([string]::IsNullOrWhiteSpace($line)) { continue }
-                  $parts = $line -split '\|', 4
-                  if ($parts.Length -lt 4) { continue }
-                  $fullHash = $parts[0]
-                  $shortHash = $parts[1]
-                  $subject = $parts[2]
-                  $author = $parts[3]
+          if ($commitsData -and $commitsData.Count -gt 0) {
+              # GitHub compare API returns oldest to newest; reverse so latest is at the top
+              [array]::Reverse($commitsData)
+
+              foreach ($c in $commitsData) {
+                  $fullHash = $c.sha
+                  $shortHash = $fullHash.Substring(0, [Math]::Min(7, $fullHash.Length))
+                  $subject = ($c.commit.message -split "`r?`n")[0]
+
+                  # Use real GitHub @handle if account is linked, otherwise Git author name without '@'
+                  if ($c.author -and $c.author.login) {
+                      $authorHandle = "@$($c.author.login)"
+                  } elseif ($c.commit.author -and $c.commit.author.name) {
+                      $authorHandle = $c.commit.author.name
+                  } else {
+                      $authorHandle = "unknown"
+                  }
 
                   $commitUrl = "https://github.com/$repo/commit/$fullHash"
-                  $entry = "* $subject ([$shortHash]($commitUrl)) by @$author"
+                  $entry = "* $subject ([$shortHash]($commitUrl)) by $authorHandle"
 
                   if ($subject -match 'Merge pull request #(\d+)' -or $subject -match '\(#(\d+)\)') {
                       $prList.Add($entry)
                   } else {
                       $commitList.Add($entry)
+                  }
+              }
+          } else {
+              # Fallback to local git log
+              $range = if ($prevTag) { "$prevTag..$tag" } else { $tag }
+              $rawCommits = git log $range --pretty=format:"%H|%h|%s|%an"
+              if ($rawCommits) {
+                  foreach ($line in ($rawCommits -split "`r?`n")) {
+                      if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                      $parts = $line -split '\|', 4
+                      if ($parts.Length -lt 4) { continue }
+                      $fullHash = $parts[0]
+                      $shortHash = $parts[1]
+                      $subject = $parts[2]
+                      $author = $parts[3]
+
+                      $commitUrl = "https://github.com/$repo/commit/$fullHash"
+                      $entry = "* $subject ([$shortHash]($commitUrl)) by $author"
+
+                      if ($subject -match 'Merge pull request #(\d+)' -or $subject -match '\(#(\d+)\)') {
+                          $prList.Add($entry)
+                      } else {
+                          $commitList.Add($entry)
+                      }
                   }
               }
           }
